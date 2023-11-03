@@ -32,7 +32,7 @@ fn main() -> Result<()> {
             // let page_size = u16::from_be_bytes([header[16], header[17]]);
 
             println!("database page size: {}", header.page_size);
-            println!("number of tabes: {}", page_header.number_of_cells);
+            println!("number of tables: {}", page_header.number_of_cells);
         }
         _ => bail!("Missing or invalid command passed: {}", command),
     }
