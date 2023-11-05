@@ -1,12 +1,14 @@
-use anyhow::{anyhow, bail};
 use nom::{
-    bytes::complete::{tag, take},
-    combinator::{all_consuming, cond, consumed},
-    multi::{count, length_value},
+    branch::alt,
+    bytes::complete::{tag, tag_no_case, take},
+    character::complete::{alphanumeric1, char, multispace0},
+    combinator::{cond, consumed, map},
+    error::ParseError,
+    multi::{count, many0, separated_list0, separated_list1},
     number::complete::{
-        be_f64, be_i16, be_i24, be_i32, be_i64, be_i8, be_u16, be_u24, be_u32, be_u64, be_u8,
+        be_f64, be_i16, be_i24, be_i32, be_i64, be_i8, be_u16, be_u24, be_u32, be_u8,
     },
-    sequence::{terminated, tuple},
+    sequence::{delimited, preceded, separated_pair, terminated, tuple},
     IResult,
 };
 
@@ -36,7 +38,7 @@ pub struct Header {
     pub sqlite_version_number: u32,
 }
 
-type ParseResult<'a, T> = IResult<&'a [u8], T>;
+type ParseResult<'a, T, I = &'a [u8]> = IResult<I, T>;
 
 pub fn parse_header(input: &[u8]) -> ParseResult<Header> {
     let mut first_parser = tuple((
@@ -130,7 +132,7 @@ fn parse_page_type(input: &[u8]) -> ParseResult<PageType> {
 }
 
 pub fn parse_page_header(input: &[u8]) -> ParseResult<PageHeader> {
-    let (rest, page_type) = parse_page_type(input)?;
+    let (_rest, page_type) = parse_page_type(input)?;
     match page_type {
         PageType::InteriorIndex | PageType::InteriorTable => {
             let (rest, t) = tuple((parse_page_type, be_u16, be_u16, be_u16, be_u8, be_u32))(input)?;
@@ -198,26 +200,6 @@ fn parse_varint(input: &[u8]) -> ParseResult<i64> {
     )))
 }
 
-fn parse_positive_varint(input: &[u8]) -> ParseResult<i64> {
-    let mut res: i64 = 0;
-    let mut shift = 0;
-    loop {
-        let (rest, byte) = be_u8(input)?;
-        res |= (i64::from(byte) & 0b0111_1111) << shift;
-        if byte & 0b1000_0000 == 0 {
-            if res.is_positive() {
-                return Ok((rest, res as i64));
-            } else {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Fail,
-                )));
-            }
-        }
-        shift += 7;
-    }
-}
-
 #[derive(Debug)]
 pub struct TableLeafCell {
     pub row_id: i64,
@@ -252,7 +234,7 @@ pub enum Cell {
     IndexInterior(IndexInteriorCell),
 }
 
-fn does_overflow(u: usize, p: usize) -> bool {
+fn does_overflow(_u: usize, _p: usize) -> bool {
     false
 }
 
@@ -325,6 +307,42 @@ pub enum Data {
     Text(String),
     Blob(Vec<u8>),
 }
+
+impl std::fmt::Display for Data {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Data::Null => write!(f, "NULL"),
+            Data::Integer(x) => write!(f, "{x}"),
+            Data::Float(x) => write!(f, "{x}"),
+            Data::Text(x) => write!(f, "{x}"),
+            Data::Blob(x) => write!(f, "{x:?}"),
+        }
+    }
+}
+
+// #[derive(Debug)]
+// pub struct SqliteSchemaRow {
+//     pub type_: String,
+//     pub name: String,
+//     pub tbl_name: String,
+//     pub rootpage: u32,
+//     pub sql: String,
+// }
+
+// pub fn parse_schema(input: &[u8]) -> ParseResult<Vec<SqliteSchemaRow>> {
+//     let (rest, page_header) = parse_page_header(input)?;
+//     let (rest, cell_pointers) = parse_cell_pointers(rest, page_header.number_of_cells)?;
+//     let res = Vec::new();
+//     for p in cell_pointers {
+//         let (rest, cell) = parse_cell(&input[p as usize..], page_header.page_type)?;
+//         match cell {
+//             Cell::TableLeaf(content) => {
+
+//             }
+//             _ => bail!("Not a table leaf"),
+//         }
+//     }
+// }
 
 pub fn parse_record(input: &[u8]) -> ParseResult<Vec<Data>> {
     let (mut rest_outer, (bytes_consumed, header_size)) = consumed(parse_varint)(input)?;
@@ -399,4 +417,109 @@ pub fn parse_record(input: &[u8]) -> ParseResult<Vec<Data>> {
         }
     }
     Ok((rest_outer, res))
+}
+
+pub fn parse_page(input: &[u8], is_first_page: bool) -> ParseResult<Vec<Vec<Data>>> {
+    let (rest, page_header) = parse_page_header(input)?;
+    let (rest, cell_pointers) = parse_cell_pointers(rest, page_header.number_of_cells)?;
+    let mut res = Vec::new();
+    for p in cell_pointers {
+        let offset = if is_first_page { 100 } else { 0 };
+        let (_rest, cell) = parse_cell(&input[p as usize - offset..], page_header.page_type)?;
+        match cell {
+            Cell::TableLeaf(content) => {
+                res.push(content.payload);
+            }
+            _ => {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Fail,
+                )))
+            }
+        }
+    }
+    Ok((rest, res))
+}
+
+fn ws<'a, F: 'a, O, E: ParseError<&'a str>>(
+    inner: F,
+) -> impl FnMut(&'a str) -> IResult<&'a str, O, E>
+where
+    F: Fn(&'a str) -> IResult<&'a str, O, E>,
+{
+    delimited(multispace0, inner, multispace0)
+}
+
+#[derive(Debug)]
+pub struct ColumnDef {
+    pub name: String,
+    pub modifiers: String,
+}
+
+pub fn parse_select(input: &str) -> ParseResult<(Vec<&str>, &str), &str> {
+    let columns = separated_list1(ws(char::<&str, nom::error::Error<_>>(',')), alphanumeric1);
+    preceded(
+        ws(tag_no_case("select")),
+        separated_pair(
+            alt((
+                map(tag_no_case("count(*)"), |s| vec![s]),
+                // map(alphanumeric1, |s| vec![s]),
+                columns,
+            )),
+            ws(tag_no_case("from")),
+            alphanumeric1,
+        ),
+    )(input)
+}
+
+pub fn parse_create_table(input: &str) -> ParseResult<Vec<ColumnDef>, &str> {
+    let list = delimited(
+        ws(char('(')),
+        separated_list0(ws(char(',')), many0(ws(alphanumeric1))),
+        ws(char(')')),
+    );
+    let (rest, desc) = preceded(
+        ws(tag_no_case("create table")),
+        preceded(ws(alphanumeric1), list),
+    )(input)?;
+    let columns: Vec<String> = desc.iter().map(|x| x.join(" ")).collect::<Vec<String>>();
+    let res = columns
+        .iter()
+        .map(|x| ColumnDef {
+            name: x.split(' ').collect::<Vec<_>>()[0].to_string(),
+            modifiers: x.split(' ').collect::<Vec<_>>()[1..].join(" "),
+        })
+        .collect();
+    Ok((rest, res))
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn test_create_table() {
+        let input = "create table foo (id integer, name text)";
+        let res = parse_create_table(input);
+        println!("{:?}", res);
+        assert_eq!(
+            res,
+            Ok(("", vec!["id integer".to_string(), "name text".to_string()]))
+        );
+    }
+
+    #[test]
+    fn test() {
+        let input = "id integer, name text";
+        let res = separated_list0(
+            char(','),
+            many0(ws(alphanumeric1::<&str, nom::error::Error<_>>)),
+        )(input);
+        println!("{:?}", res);
+        assert_eq!(
+            res,
+            Ok(("", vec![vec!["id", "integer"], vec!["name", "text"]]))
+        );
+    }
 }
