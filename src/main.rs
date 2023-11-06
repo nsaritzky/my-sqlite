@@ -2,6 +2,7 @@ mod parser;
 
 use anyhow::{anyhow, bail, Result};
 use parser::{parse_cell, parse_page};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
 
@@ -75,7 +76,7 @@ fn main() -> Result<()> {
             )
             .map_err(|e| anyhow!("{e}"))?;
             match parser::parse_select(s) {
-                Ok((_rest, (names, table))) => {
+                Ok((_rest, (names, table, where_))) => {
                     let root_page = schema_page
                         .iter()
                         .find(|elem| {
@@ -110,25 +111,44 @@ fn main() -> Result<()> {
                             if let Some(parser::Data::Text(s)) = create_table {
                                 let (_rest, columns) =
                                     parser::parse_create_table(&s).map_err(|e| anyhow!("{e}"))?;
-                                let indices: Result<Vec<usize>, _> = names
-                                    .iter()
-                                    .map(|name| {
-                                        columns
-                                            .iter()
-                                            .position(|col| &col.name == name)
-                                            .ok_or(anyhow!("Column {name} not found"))
-                                    })
-                                    .collect();
-                                if let Ok(v) = indices {
-                                    for row in page {
-                                        println!(
-                                            "{}",
-                                            v.iter()
-                                                .map(|i| row[*i].to_string())
-                                                .collect::<Vec<_>>()
-                                                .join("|")
-                                        );
+                                let mut rows = Vec::<HashMap<String, parser::Data>>::new();
+                                for row in &page {
+                                    let mut map = HashMap::new();
+                                    for (i, col) in columns.iter().enumerate() {
+                                        map.insert(col.name.clone(), row[i].clone());
                                     }
+                                    rows.push(map);
+                                }
+                                let rows = if let Some(where_) = where_ {
+                                    rows.into_iter()
+                                        .filter(|row| {
+                                            let where_value = row.get(&where_.column);
+                                            if let Some(where_value) = where_value {
+                                                where_value
+                                                    == &parser::Data::Text(where_.value.clone())
+                                            } else {
+                                                false
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                } else {
+                                    rows
+                                };
+                                for row in rows {
+                                    let mut row_values = Vec::new();
+                                    for name in &names {
+                                        if let Some(value) = row.get(*name) {
+                                            row_values.push(value);
+                                        }
+                                    }
+                                    println!(
+                                        "{}",
+                                        row_values
+                                            .iter()
+                                            .map(|v| v.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("|")
+                                    );
                                 }
                             }
                         }
@@ -136,34 +156,6 @@ fn main() -> Result<()> {
                 }
                 Err(e) => bail!("{e}"),
             }
-
-            // for (i, page) in buf.chunks_mut(header.page_size as usize).enumerate() {
-            //     if i == 0 {
-            //         let page = &page[100..];
-            //         let (rest, page_header) =
-            //             parser::parse_page_header(page).map_err(|e| anyhow!("{e}"))?;
-            //         let (rest, cell_pointers) =
-            //             parse_cell_pointers(rest, page_header.number_of_cells)
-            //                 .map_err(|e| anyhow!("{e}"))?;
-            //         for p in cell_pointers {
-            //             let (_, cell) =
-            //                 parse_cell(&page[p as usize - 100..], page_header.page_type)
-            //                     .map_err(|e| anyhow!("{e}"))?;
-            //             println!("{:?}", cell);
-            //         }
-            //     } else {
-            //         let (rest, page_header) =
-            //             parser::parse_page_header(page).map_err(|e| anyhow!("{e}"))?;
-            //         let (rest, cell_pointers) =
-            //             parse_cell_pointers(rest, page_header.number_of_cells)
-            //                 .map_err(|e| anyhow!("{e}"))?;
-            //         for p in cell_pointers {
-            //             let (_rest, cell) = parse_cell(&page[p as usize..], page_header.page_type)
-            //                 .map_err(|e| anyhow!("{e}"))?;
-            //             println!("{:?}", cell);
-            //         }
-            //     }
-            // }
         }
     }
 

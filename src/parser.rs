@@ -2,13 +2,13 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take},
     character::complete::{alphanumeric1, char, multispace0},
-    combinator::{cond, consumed, map},
+    combinator::{cond, consumed, map, opt},
     error::ParseError,
     multi::{count, many0, separated_list0, separated_list1},
     number::complete::{
         be_f64, be_i16, be_i24, be_i32, be_i64, be_i8, be_u16, be_u24, be_u32, be_u8,
     },
-    sequence::{delimited, preceded, separated_pair, terminated, tuple},
+    sequence::{delimited, preceded, terminated, tuple},
     IResult,
 };
 
@@ -299,7 +299,7 @@ pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Data {
     Null,
     Integer(i64),
@@ -445,22 +445,74 @@ fn ws<'a, F: 'a, O, E: ParseError<&'a str>>(
     inner: F,
 ) -> impl FnMut(&'a str) -> IResult<&'a str, O, E>
 where
-    F: Fn(&'a str) -> IResult<&'a str, O, E>,
+    F: FnMut(&'a str) -> IResult<&'a str, O, E>,
 {
     delimited(multispace0, inner, multispace0)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ColumnDef {
     pub name: String,
     pub modifiers: String,
 }
 
-pub fn parse_select(input: &str) -> ParseResult<(Vec<&str>, &str), &str> {
+#[derive(Debug, PartialEq)]
+pub enum Comparator {
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct WhereClause {
+    pub column: String,
+    pub operator: Comparator,
+    pub value: String,
+}
+
+fn parse_where(input: &str) -> ParseResult<WhereClause, &str> {
+    let (rest, _) = ws(tag_no_case("where"))(input)?;
+    let (rest, column) = ws(alphanumeric1)(rest)?;
+    let (rest, operator) = alt((
+        tag("="),
+        tag("!="),
+        tag("<"),
+        tag(">"),
+        tag("<="),
+        tag(">="),
+    ))(rest)?;
+    let (rest, value) = ws(delimited(char('\''), alphanumeric1, char('\'')))(rest)?;
+    Ok((
+        rest,
+        WhereClause {
+            column: column.to_string(),
+            operator: match operator {
+                "=" => Comparator::Eq,
+                // "!=" => Comparator::Ne,
+                // "<" => Comparator::Lt,
+                // ">" => Comparator::Gt,
+                // "<=" => Comparator::Le,
+                // ">=" => Comparator::Ge,
+                _ => {
+                    return Err(nom::Err::Error(nom::error::Error {
+                        input,
+                        code: nom::error::ErrorKind::Fail,
+                    }))
+                }
+            },
+            value: value.to_string(),
+        },
+    ))
+}
+
+pub fn parse_select(input: &str) -> ParseResult<(Vec<&str>, &str, Option<WhereClause>), &str> {
     let columns = separated_list1(ws(char::<&str, nom::error::Error<_>>(',')), alphanumeric1);
-    preceded(
+    let (rest, (columns, _from, table, where_)) = preceded(
         ws(tag_no_case("select")),
-        separated_pair(
+        tuple((
             alt((
                 map(tag_no_case("count(*)"), |s| vec![s]),
                 // map(alphanumeric1, |s| vec![s]),
@@ -468,8 +520,10 @@ pub fn parse_select(input: &str) -> ParseResult<(Vec<&str>, &str), &str> {
             )),
             ws(tag_no_case("from")),
             alphanumeric1,
-        ),
-    )(input)
+            opt(parse_where),
+        )),
+    )(input)?;
+    Ok((rest, (columns, table, where_)))
 }
 
 pub fn parse_create_table(input: &str) -> ParseResult<Vec<ColumnDef>, &str> {
@@ -498,14 +552,54 @@ mod tests {
 
     use super::*;
 
+    // #[test]
+    // fn test_create_table() {
+    //     let input = "create table foo (id integer, name text)";
+    //     let res = parse_create_table(input);
+    //     println!("{:?}", res);
+    //     assert_eq!(
+    //         res,
+    //         Ok(("", vec!["id integer".to_string(), "name text".to_string()]))
+    //     );
+    // }
+
     #[test]
-    fn test_create_table() {
-        let input = "create table foo (id integer, name text)";
-        let res = parse_create_table(input);
+    fn test_where() {
+        let input = "where name = \'hello\'";
+        let res = parse_where(input);
         println!("{:?}", res);
         assert_eq!(
             res,
-            Ok(("", vec!["id integer".to_string(), "name text".to_string()]))
+            Ok((
+                "",
+                WhereClause {
+                    column: "name".to_string(),
+                    operator: Comparator::Eq,
+                    value: "hello".to_string()
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn test_select() {
+        let input = "select id, name from foo where name = \'hello\'";
+        let res = parse_select(input);
+        println!("{:?}", res);
+        assert_eq!(
+            res,
+            Ok((
+                "",
+                (
+                    vec!["id", "name"],
+                    "foo",
+                    Some(WhereClause {
+                        column: "name".to_string(),
+                        operator: Comparator::Eq,
+                        value: "hello".to_string()
+                    })
+                )
+            ))
         );
     }
 
