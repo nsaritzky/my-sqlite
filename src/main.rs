@@ -3,14 +3,12 @@ mod parser;
 
 use anyhow::{anyhow, bail, Result};
 use data::{get_create_table, get_root_page, get_rows};
-use parser::{parse_cell, parse_page, Data, PageValue};
-use std::collections::HashMap;
+use parser::{parse_cell, parse_page, Data};
+
 use std::fs::File;
 use std::io::prelude::*;
 
 use crate::parser::parse_cell_pointers;
-
-fn get_pages() {}
 
 fn main() -> Result<()> {
     // Parse arguments
@@ -31,7 +29,7 @@ fn main() -> Result<()> {
             let (rest, header) = parser::parse_header(&buf).map_err(|e| anyhow::anyhow!("{e}"))?;
             let (rest, page_header) =
                 parser::parse_page_header(rest).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let (rest, cell_pointers) = parse_cell_pointers(rest, page_header.number_of_cells)
+            let (_rest, cell_pointers) = parse_cell_pointers(rest, page_header.number_of_cells)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             println!("database page size: {}", header.page_size);
@@ -42,12 +40,12 @@ fn main() -> Result<()> {
             let mut file = File::open(&args[1])?;
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)?;
-            let (rest, header) = parser::parse_header(&buf).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let (_rest, header) = parser::parse_header(&buf).map_err(|e| anyhow::anyhow!("{e}"))?;
             let raw_pages: Vec<&[u8]> = buf.chunks(header.page_size as usize).collect();
             let (
-                rest,
+                _rest,
                 parser::Page {
-                    header: schema_header,
+                    header: _schema_header,
                     values: schema,
                 },
             ) = parser::parse_page(raw_pages[0], true).map_err(|e| anyhow!("{e}"))?;
@@ -96,7 +94,7 @@ fn main() -> Result<()> {
             let (
                 _rest,
                 parser::Page {
-                    header: page_header,
+                    header: _page_header,
                     values: schema_page,
                 },
             ) = parse_page(raw_pages[0], true).map_err(|e| anyhow!("{e}"))?;

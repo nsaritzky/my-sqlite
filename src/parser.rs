@@ -1,15 +1,15 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take, take_while, take_while1},
-    character::complete::{alphanumeric1, anychar, char, multispace0},
+    bytes::complete::{tag, tag_no_case, take, take_while1},
+    character::complete::{anychar, char, multispace0},
     combinator::{cond, consumed, map, opt},
     error::ParseError,
-    multi::{count, many0, many1, many_till, separated_list0, separated_list1},
+    multi::{count, many0, many_till, separated_list0, separated_list1},
     number::complete::{
         be_f64, be_i16, be_i24, be_i32, be_i64, be_i8, be_u16, be_u24, be_u32, be_u8,
     },
     sequence::{delimited, preceded, terminated, tuple},
-    IResult, Parser,
+    IResult,
 };
 use regex::Regex;
 
@@ -214,12 +214,14 @@ pub struct TableInteriorCell {
     pub row_id: i64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct IndexLeafCell {
     payload: Vec<Data>,
     overflow_page: Option<u32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct IndexInteriorCell {
     left_child_page: u32,
@@ -385,7 +387,7 @@ pub fn parse_record(input: &[u8], row_id: i64) -> ParseResult<Vec<Data>> {
             }
             5 => {
                 let (rest, xs) = count(be_u24, 2)(rest_outer)?;
-                let x = *xs.first().unwrap() as u64 + (*xs.first().unwrap() as u64) << 24;
+                let x = (*xs.first().unwrap() as u64 + (*xs.first().unwrap() as u64)) << 24;
                 rest_outer = rest;
                 res.push(Data::Integer(x as i64));
             }
@@ -486,6 +488,7 @@ pub struct ColumnDef {
     pub ipk: bool, // is an integer primary key
 }
 
+#[allow(dead_code)]
 #[derive(Debug, PartialEq, Clone)]
 pub enum Comparator {
     Eq,
@@ -598,6 +601,8 @@ pub fn parse_create_table(input: &str) -> ParseResult<Vec<ColumnDef>, &str> {
 
 #[cfg(test)]
 mod tests {
+    use nom::character::complete::alphanumeric1;
+
     use super::*;
 
     #[test]
