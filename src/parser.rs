@@ -1,16 +1,17 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take},
-    character::complete::{alphanumeric1, char, multispace0},
+    bytes::complete::{tag, tag_no_case, take, take_while, take_while1},
+    character::complete::{alphanumeric1, anychar, char, multispace0},
     combinator::{cond, consumed, map, opt},
     error::ParseError,
-    multi::{count, many0, separated_list0, separated_list1},
+    multi::{count, many0, many1, many_till, separated_list0, separated_list1},
     number::complete::{
         be_f64, be_i16, be_i24, be_i32, be_i64, be_i8, be_u16, be_u24, be_u32, be_u8,
     },
     sequence::{delimited, preceded, terminated, tuple},
-    IResult,
+    IResult, Parser,
 };
+use regex::Regex;
 
 #[derive(Debug, Clone)]
 pub struct Header {
@@ -109,7 +110,7 @@ pub struct PageHeader {
     pub right_most_pointer: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PageType {
     InteriorIndex,
     InteriorTable,
@@ -186,10 +187,10 @@ fn parse_varint(input: &[u8]) -> ParseResult<i64> {
     while index < 9 {
         let (rest, byte) = be_u8(&input[index as usize..])?;
         let byte = i64::from_be_bytes([0, 0, 0, 0, 0, 0, 0, byte]);
-        let add = byte & 0b0111_1111 as i64;
+        let add = byte & 0b0111_1111_i64;
         res = (res << shift) | add;
         if byte & 0b1000_0000 == 0 {
-            return Ok((rest, res as i64));
+            return Ok((rest, res));
         }
         shift += 7;
         index += 1;
@@ -209,20 +210,20 @@ pub struct TableLeafCell {
 
 #[derive(Debug)]
 pub struct TableInteriorCell {
-    left_child_page: u32,
-    row_id: u64,
+    pub left_child_page: u32,
+    pub row_id: i64,
 }
 
 #[derive(Debug)]
 pub struct IndexLeafCell {
-    payload: Vec<u8>,
+    payload: Vec<Data>,
     overflow_page: Option<u32>,
 }
 
 #[derive(Debug)]
 pub struct IndexInteriorCell {
     left_child_page: u32,
-    payload: Vec<u8>,
+    payload: Vec<Data>,
     overflow_page: Option<u32>,
 }
 
@@ -249,8 +250,7 @@ pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
                 rest,
                 Cell::TableLeaf(TableLeafCell {
                     row_id,
-                    payload: parse_record(payload)?.1,
-                    // payload: payload.to_vec(),
+                    payload: parse_record(payload, row_id)?.1,
                     overflow_page,
                 }),
             ))
@@ -262,7 +262,7 @@ pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
                 rest,
                 Cell::TableInterior(TableInteriorCell {
                     left_child_page,
-                    row_id: row_id as u64,
+                    row_id,
                 }),
             ))
         }
@@ -271,11 +271,13 @@ pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
             let (rest, payload) = take(payload_size as usize)(rest)?;
             let (rest, overflow_page) = cond(does_overflow(0, 0), be_u32)(rest)?;
 
+            let (_, key) = be_i64(&payload[payload_size as usize - 8..])?;
+            let (_, record) = parse_record(payload, key)?;
             Ok((
                 rest,
                 Cell::IndexLeaf(IndexLeafCell {
                     //payload: all_consuming(parse_record)(payload)?.1,
-                    payload: payload.to_vec(),
+                    payload: record,
                     overflow_page,
                 }),
             ))
@@ -286,12 +288,15 @@ pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
             let (rest, payload) = take(payload_size as usize)(rest)?;
             let (rest, overflow_page) = cond(does_overflow(0, 0), be_u32)(rest)?;
 
+            let (_, key) = be_i64(&payload[payload_size as usize - 8..])?;
+            let (_, record) = parse_record(payload, key)?;
+
             Ok((
                 rest,
                 Cell::IndexInterior(IndexInteriorCell {
                     left_child_page,
                     // payload: all_consuming(parse_record)(payload)?.1,
-                    payload: payload.to_vec(),
+                    payload: record,
                     overflow_page,
                 }),
             ))
@@ -301,7 +306,7 @@ pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Data {
-    Null,
+    Null(i64), // contains the row_id of the row that contains the NULL
     Integer(i64),
     Float(f64),
     Text(String),
@@ -311,7 +316,7 @@ pub enum Data {
 impl std::fmt::Display for Data {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Data::Null => write!(f, "NULL"),
+            Data::Null(_) => write!(f, "NULL"),
             Data::Integer(x) => write!(f, "{x}"),
             Data::Float(x) => write!(f, "{x}"),
             Data::Text(x) => write!(f, "{x}"),
@@ -344,7 +349,7 @@ impl std::fmt::Display for Data {
 //     }
 // }
 
-pub fn parse_record(input: &[u8]) -> ParseResult<Vec<Data>> {
+pub fn parse_record(input: &[u8], row_id: i64) -> ParseResult<Vec<Data>> {
     let (mut rest_outer, (bytes_consumed, header_size)) = consumed(parse_varint)(input)?;
     let mut remaining_in_header = header_size - bytes_consumed.len() as i64;
     let mut serial_types = Vec::new();
@@ -357,7 +362,7 @@ pub fn parse_record(input: &[u8]) -> ParseResult<Vec<Data>> {
     let mut res = Vec::new();
     for s in serial_types {
         match s {
-            0 => res.push(Data::Null),
+            0 => res.push(Data::Null(row_id)),
             1 => {
                 let (rest, x) = be_i8(rest_outer)?;
                 rest_outer = rest;
@@ -380,19 +385,19 @@ pub fn parse_record(input: &[u8]) -> ParseResult<Vec<Data>> {
             }
             5 => {
                 let (rest, xs) = count(be_u24, 2)(rest_outer)?;
-                let x = *xs.get(0).unwrap() as u64 + (*xs.get(1).unwrap() as u64) << 24;
+                let x = *xs.first().unwrap() as u64 + (*xs.first().unwrap() as u64) << 24;
                 rest_outer = rest;
                 res.push(Data::Integer(x as i64));
             }
             6 => {
                 let (rest, x) = be_i64(rest_outer)?;
                 rest_outer = rest;
-                res.push(Data::Integer(x as i64));
+                res.push(Data::Integer(x));
             }
             7 => {
                 let (rest, x) = be_f64(rest_outer)?;
                 rest_outer = rest;
-                res.push(Data::Float(x as f64));
+                res.push(Data::Float(x));
             }
             8 => res.push(Data::Integer(0)),
             9 => res.push(Data::Integer(1)),
@@ -419,16 +424,34 @@ pub fn parse_record(input: &[u8]) -> ParseResult<Vec<Data>> {
     Ok((rest_outer, res))
 }
 
-pub fn parse_page(input: &[u8], is_first_page: bool) -> ParseResult<Vec<Vec<Data>>> {
-    let (rest, page_header) = parse_page_header(input)?;
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageValue {
+    Data(Vec<Data>),
+    InteriorCell { left_child_page: u32, row_id: u64 },
+}
+
+#[derive(Debug)]
+pub struct Page {
+    pub header: PageHeader,
+    pub values: Vec<PageValue>,
+}
+
+pub fn parse_page(input: &[u8], is_first_page: bool) -> ParseResult<Page> {
+    let offset = if is_first_page { 100 } else { 0 };
+    let (rest, page_header) = parse_page_header(&input[offset..])?;
     let (rest, cell_pointers) = parse_cell_pointers(rest, page_header.number_of_cells)?;
     let mut res = Vec::new();
     for p in cell_pointers {
-        let offset = if is_first_page { 100 } else { 0 };
-        let (_rest, cell) = parse_cell(&input[p as usize - offset..], page_header.page_type)?;
+        let (_rest, cell) = parse_cell(&input[p as usize..], page_header.page_type)?;
         match cell {
             Cell::TableLeaf(content) => {
-                res.push(content.payload);
+                res.push(PageValue::Data(content.payload));
+            }
+            Cell::TableInterior(content) => {
+                res.push(PageValue::InteriorCell {
+                    left_child_page: content.left_child_page,
+                    row_id: content.row_id as u64,
+                });
             }
             _ => {
                 return Err(nom::Err::Error(nom::error::Error::new(
@@ -438,7 +461,13 @@ pub fn parse_page(input: &[u8], is_first_page: bool) -> ParseResult<Vec<Vec<Data
             }
         }
     }
-    Ok((rest, res))
+    Ok((
+        rest,
+        Page {
+            header: page_header,
+            values: res,
+        },
+    ))
 }
 
 fn ws<'a, F: 'a, O, E: ParseError<&'a str>>(
@@ -454,9 +483,10 @@ where
 pub struct ColumnDef {
     pub name: String,
     pub modifiers: String,
+    pub ipk: bool, // is an integer primary key
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Comparator {
     Eq,
     Ne,
@@ -466,7 +496,7 @@ pub enum Comparator {
     Ge,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct WhereClause {
     pub column: String,
     pub operator: Comparator,
@@ -475,7 +505,7 @@ pub struct WhereClause {
 
 fn parse_where(input: &str) -> ParseResult<WhereClause, &str> {
     let (rest, _) = ws(tag_no_case("where"))(input)?;
-    let (rest, column) = ws(alphanumeric1)(rest)?;
+    let (rest, column) = ws(identifier)(rest)?;
     let (rest, operator) = alt((
         tag("="),
         tag("!="),
@@ -484,7 +514,10 @@ fn parse_where(input: &str) -> ParseResult<WhereClause, &str> {
         tag("<="),
         tag(">="),
     ))(rest)?;
-    let (rest, value) = ws(delimited(char('\''), alphanumeric1, char('\'')))(rest)?;
+    let (rest, value) = ws(preceded(
+        char('\''),
+        map(many_till(anychar, char('\'')), |(chars, _)| chars),
+    ))(rest)?;
     Ok((
         rest,
         WhereClause {
@@ -503,13 +536,13 @@ fn parse_where(input: &str) -> ParseResult<WhereClause, &str> {
                     }))
                 }
             },
-            value: value.to_string(),
+            value: value.iter().collect::<String>(),
         },
     ))
 }
 
 pub fn parse_select(input: &str) -> ParseResult<(Vec<&str>, &str, Option<WhereClause>), &str> {
-    let columns = separated_list1(ws(char::<&str, nom::error::Error<_>>(',')), alphanumeric1);
+    let columns = separated_list1(ws(char::<&str, nom::error::Error<_>>(',')), identifier);
     let (rest, (columns, _from, table, where_)) = preceded(
         ws(tag_no_case("select")),
         tuple((
@@ -519,22 +552,37 @@ pub fn parse_select(input: &str) -> ParseResult<(Vec<&str>, &str, Option<WhereCl
                 columns,
             )),
             ws(tag_no_case("from")),
-            alphanumeric1,
+            identifier,
             opt(parse_where),
         )),
     )(input)?;
     Ok((rest, (columns, table, where_)))
 }
 
+fn identifier(input: &str) -> ParseResult<&str, &str> {
+    alt((
+        take_while1(|c: char| c.is_alphanumeric() || c == '_'),
+        delimited(
+            char('"'),
+            take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == ' '),
+            char('"'),
+        ),
+    ))(input)
+}
+
 pub fn parse_create_table(input: &str) -> ParseResult<Vec<ColumnDef>, &str> {
+    let ipk_regex = Regex::new(r"(?i)integer primary key").unwrap();
     let list = delimited(
         ws(char('(')),
-        separated_list0(ws(char(',')), many0(ws(alphanumeric1))),
+        separated_list0(ws(char(',')), many0(ws(identifier))),
         ws(char(')')),
     );
     let (rest, desc) = preceded(
         ws(tag_no_case("create table")),
-        preceded(ws(alphanumeric1), list),
+        preceded(
+            ws(delimited(opt(char('"')), identifier, opt(char('"')))),
+            list,
+        ),
     )(input)?;
     let columns: Vec<String> = desc.iter().map(|x| x.join(" ")).collect::<Vec<String>>();
     let res = columns
@@ -542,6 +590,7 @@ pub fn parse_create_table(input: &str) -> ParseResult<Vec<ColumnDef>, &str> {
         .map(|x| ColumnDef {
             name: x.split(' ').collect::<Vec<_>>()[0].to_string(),
             modifiers: x.split(' ').collect::<Vec<_>>()[1..].join(" "),
+            ipk: ipk_regex.is_match(x),
         })
         .collect();
     Ok((rest, res))
@@ -549,23 +598,44 @@ pub fn parse_create_table(input: &str) -> ParseResult<Vec<ColumnDef>, &str> {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
-    // #[test]
-    // fn test_create_table() {
-    //     let input = "create table foo (id integer, name text)";
-    //     let res = parse_create_table(input);
-    //     println!("{:?}", res);
-    //     assert_eq!(
-    //         res,
-    //         Ok(("", vec!["id integer".to_string(), "name text".to_string()]))
-    //     );
-    // }
+    #[test]
+    fn test_ws_identifier() {
+        let input = "hello there";
+        let res = many0(ws(identifier))(input);
+        println!("{:?}", res);
+        assert_eq!(res, Ok(("", vec!["hello", "there"])));
+    }
+
+    #[test]
+    fn test_create_table() {
+        let input = "create table foo (id integer primary key, name text)";
+        let res = parse_create_table(input);
+        println!("{:?}", res);
+        assert_eq!(
+            res,
+            Ok((
+                "",
+                vec![
+                    ColumnDef {
+                        name: "id".to_string(),
+                        modifiers: "integer primary key".to_string(),
+                        ipk: true,
+                    },
+                    ColumnDef {
+                        name: "name".to_string(),
+                        modifiers: "text".to_string(),
+                        ipk: false,
+                    }
+                ]
+            ))
+        );
+    }
 
     #[test]
     fn test_where() {
-        let input = "where name = \'hello\'";
+        let input = "where name_o = \'hello\'";
         let res = parse_where(input);
         println!("{:?}", res);
         assert_eq!(
@@ -573,7 +643,7 @@ mod tests {
             Ok((
                 "",
                 WhereClause {
-                    column: "name".to_string(),
+                    column: "name_o".to_string(),
                     operator: Comparator::Eq,
                     value: "hello".to_string()
                 }
@@ -583,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_select() {
-        let input = "select id, name from foo where name = \'hello\'";
+        let input = "SELECT id, name, eye_color FROM superheroes WHERE eye_color = \'Pink Eyes\'";
         let res = parse_select(input);
         println!("{:?}", res);
         assert_eq!(
@@ -615,5 +685,15 @@ mod tests {
             res,
             Ok(("", vec![vec!["id", "integer"], vec!["name", "text"]]))
         );
+    }
+
+    #[test]
+    fn test_identifier() {
+        let input = "hello_there";
+        let res = identifier(input);
+        println!("{:?}", res);
+        assert_eq!(res, Ok(("", "hello_there")));
+        let res2 = identifier("hello there");
+        assert_eq!(res2, Ok((" there", "hello")));
     }
 }
