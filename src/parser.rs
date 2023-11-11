@@ -13,6 +13,11 @@ use nom::{
 };
 use regex::Regex;
 
+const PAGE_TYPE_INTERIOR_INDEX: u8 = 2;
+const PAGE_TYPE_INTERIOR_TABLE: u8 = 5;
+const PAGE_TYPE_LEAF_INDEX: u8 = 10;
+const PAGE_TYPE_LEAF_TABLE: u8 = 13;
+
 #[derive(Debug, Clone)]
 pub struct Header {
     pub magic: String,
@@ -39,7 +44,7 @@ pub struct Header {
     pub sqlite_version_number: u32,
 }
 
-type ParseResult<'a, T, I = &'a [u8]> = IResult<I, T>;
+type ParseResult<'a, T, I = &'a [u8], E = nom::error::Error<I>> = IResult<I, T, E>;
 
 pub fn parse_header(input: &[u8]) -> ParseResult<Header> {
     let mut first_parser = tuple((
@@ -121,10 +126,10 @@ pub enum PageType {
 fn parse_page_type(input: &[u8]) -> ParseResult<PageType> {
     let (rest, x) = be_u8(input)?;
     match x {
-        2 => Ok((rest, PageType::InteriorIndex)),
-        5 => Ok((rest, PageType::InteriorTable)),
-        10 => Ok((rest, PageType::LeafIndex)),
-        13 => Ok((rest, PageType::LeafTable)),
+        PAGE_TYPE_INTERIOR_INDEX => Ok((rest, PageType::InteriorIndex)),
+        PAGE_TYPE_INTERIOR_TABLE => Ok((rest, PageType::InteriorTable)),
+        PAGE_TYPE_LEAF_INDEX => Ok((rest, PageType::LeafIndex)),
+        PAGE_TYPE_LEAF_TABLE => Ok((rest, PageType::LeafTable)),
         _ => Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
@@ -180,19 +185,49 @@ pub fn parse_cell_pointers(input: &[u8], number_of_cells: u16) -> ParseResult<Ve
     Ok((rest, res))
 }
 
-fn parse_varint(input: &[u8]) -> ParseResult<i64> {
+// /// Parse a SQLite variable-length integer (varint).
+// fn varint(input: &[u8]) -> IResult<&[u8], u64> {
+//     // Each byte can contribute to at most 7 bits of the data.
+//     // If the high bit of a byte is set, it means that the next byte is also part of the varint.
+//     let mut value: u64 = 0;
+//     let mut bytes_read = 0;
+
+//     let (mut input, _) = take(1usize)(input)?;
+//     for byte in input.iter().take(9) {
+//         // Varints are at most 9 bytes long.
+//         // Add the low 7 bits to value.
+//         value |= (byte & 0x7F) as u64;
+//         bytes_read += 1;
+
+//         if byte & 0x80 == 0 {
+//             // If the high bit is not set, this is the last byte.
+//             break;
+//         }
+
+//         if bytes_read != 9 {
+//             // Shift to make room for the next 7 bits, unless this is the last byte.
+//             value <<= 7;
+//         }
+
+//         // Move to the next byte.
+//         let (i, _) = take(1usize)(input)?;
+//         input = i;
+//     }
+
+//     Ok((input, value))
+// }
+
+fn varint(input: &[u8]) -> ParseResult<i64> {
     let mut res = 0;
-    let mut shift = 0;
     let mut index = 0;
     while index < 9 {
         let (rest, byte) = be_u8(&input[index as usize..])?;
         let byte = i64::from_be_bytes([0, 0, 0, 0, 0, 0, 0, byte]);
         let add = byte & 0b0111_1111_i64;
-        res = (res << shift) | add;
+        res = (res << 7) | add;
         if byte & 0b1000_0000 == 0 {
             return Ok((rest, res));
         }
-        shift += 7;
         index += 1;
     }
     Err(nom::Err::Error(nom::error::Error::new(
@@ -244,22 +279,22 @@ fn does_overflow(_u: usize, _p: usize) -> bool {
 pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
     match page_type {
         PageType::LeafTable => {
-            let (rest, payload_size) = parse_varint(input)?;
-            let (rest, row_id) = parse_varint(rest)?;
+            let (rest, payload_size) = varint(input)?;
+            let (rest, row_id) = varint(rest)?;
             let (rest, payload) = take(payload_size as usize)(rest)?;
             let (rest, overflow_page) = cond(does_overflow(0, 0), be_u32)(rest)?;
             Ok((
                 rest,
                 Cell::TableLeaf(TableLeafCell {
                     row_id,
-                    payload: parse_record(payload, row_id)?.1,
+                    payload: parse_record(payload)?.1,
                     overflow_page,
                 }),
             ))
         }
         PageType::InteriorTable => {
             let (rest, left_child_page) = be_u32(input)?;
-            let (rest, row_id) = parse_varint(rest)?;
+            let (rest, row_id) = varint(rest)?;
             Ok((
                 rest,
                 Cell::TableInterior(TableInteriorCell {
@@ -269,16 +304,14 @@ pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
             ))
         }
         PageType::LeafIndex => {
-            let (rest, payload_size) = parse_varint(input)?;
+            let (rest, payload_size) = varint(input)?;
             let (rest, payload) = take(payload_size as usize)(rest)?;
-            let (rest, overflow_page) = cond(does_overflow(0, 0), be_u32)(rest)?;
+            let (_rest, overflow_page) = cond(does_overflow(0, 0), be_u32)(rest)?;
 
-            let (_, key) = be_i64(&payload[payload_size as usize - 8..])?;
-            let (_, record) = parse_record(payload, key)?;
+            let (rest, record) = parse_record(payload)?;
             Ok((
                 rest,
                 Cell::IndexLeaf(IndexLeafCell {
-                    //payload: all_consuming(parse_record)(payload)?.1,
                     payload: record,
                     overflow_page,
                 }),
@@ -286,12 +319,11 @@ pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
         }
         PageType::InteriorIndex => {
             let (rest, left_child_page) = be_u32(input)?;
-            let (rest, payload_size) = parse_varint(rest)?;
+            let (rest, payload_size) = varint(rest)?;
             let (rest, payload) = take(payload_size as usize)(rest)?;
-            let (rest, overflow_page) = cond(does_overflow(0, 0), be_u32)(rest)?;
+            let (_rest, overflow_page) = cond(does_overflow(0, 0), be_u32)(rest)?;
 
-            let (_, key) = be_i64(&payload[payload_size as usize - 8..])?;
-            let (_, record) = parse_record(payload, key)?;
+            let (rest, record) = parse_record(payload)?;
 
             Ok((
                 rest,
@@ -306,9 +338,9 @@ pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Data {
-    Null(i64), // contains the row_id of the row that contains the NULL
+    Null,
     Integer(i64),
     Float(f64),
     Text(String),
@@ -318,7 +350,7 @@ pub enum Data {
 impl std::fmt::Display for Data {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Data::Null(_) => write!(f, "NULL"),
+            Data::Null => write!(f, "NULL"),
             Data::Integer(x) => write!(f, "{x}"),
             Data::Float(x) => write!(f, "{x}"),
             Data::Text(x) => write!(f, "{x}"),
@@ -351,12 +383,12 @@ impl std::fmt::Display for Data {
 //     }
 // }
 
-pub fn parse_record(input: &[u8], row_id: i64) -> ParseResult<Vec<Data>> {
-    let (mut rest_outer, (bytes_consumed, header_size)) = consumed(parse_varint)(input)?;
+pub fn parse_record(input: &[u8]) -> ParseResult<Vec<Data>> {
+    let (mut rest_outer, (bytes_consumed, header_size)) = consumed(varint)(input)?;
     let mut remaining_in_header = header_size - bytes_consumed.len() as i64;
     let mut serial_types = Vec::new();
     while remaining_in_header > 0 {
-        let (rest, (bytes_consumed, serial_type)) = consumed(parse_varint)(rest_outer)?;
+        let (rest, (bytes_consumed, serial_type)) = consumed(varint)(rest_outer)?;
         rest_outer = rest;
         serial_types.push(serial_type);
         remaining_in_header -= bytes_consumed.len() as i64;
@@ -364,7 +396,7 @@ pub fn parse_record(input: &[u8], row_id: i64) -> ParseResult<Vec<Data>> {
     let mut res = Vec::new();
     for s in serial_types {
         match s {
-            0 => res.push(Data::Null(row_id)),
+            0 => res.push(Data::Null),
             1 => {
                 let (rest, x) = be_i8(rest_outer)?;
                 rest_outer = rest;
@@ -428,8 +460,32 @@ pub fn parse_record(input: &[u8], row_id: i64) -> ParseResult<Vec<Data>> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PageValue {
-    Data(Vec<Data>),
-    InteriorCell { left_child_page: u32, row_id: u64 },
+    LeafTableCell {
+        payload: Vec<Data>,
+        rowid: i64,
+    },
+    InteriorTableCell {
+        left_child_page: u32,
+        rowid: i64,
+    },
+    InteriorIndexCell {
+        left_child_page: u32,
+        payload: Vec<Data>,
+    },
+    LeafIndexCell {
+        payload: Vec<Data>,
+    },
+}
+
+impl PageValue {
+    pub fn get_payload(&self) -> Option<&Vec<Data>> {
+        match self {
+            PageValue::LeafTableCell { payload, .. } => Some(payload),
+            PageValue::InteriorTableCell { .. } => None,
+            PageValue::InteriorIndexCell { payload, .. } => Some(payload),
+            PageValue::LeafIndexCell { payload } => Some(payload),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -447,19 +503,27 @@ pub fn parse_page(input: &[u8], is_first_page: bool) -> ParseResult<Page> {
         let (_rest, cell) = parse_cell(&input[p as usize..], page_header.page_type)?;
         match cell {
             Cell::TableLeaf(content) => {
-                res.push(PageValue::Data(content.payload));
-            }
-            Cell::TableInterior(content) => {
-                res.push(PageValue::InteriorCell {
-                    left_child_page: content.left_child_page,
-                    row_id: content.row_id as u64,
+                res.push(PageValue::LeafTableCell {
+                    payload: content.payload,
+                    rowid: content.row_id,
                 });
             }
-            _ => {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Fail,
-                )))
+            Cell::TableInterior(content) => {
+                res.push(PageValue::InteriorTableCell {
+                    left_child_page: content.left_child_page,
+                    rowid: content.row_id,
+                });
+            }
+            Cell::IndexLeaf(content) => {
+                res.push(PageValue::LeafIndexCell {
+                    payload: content.payload,
+                });
+            }
+            Cell::IndexInterior(content) => {
+                res.push(PageValue::InteriorIndexCell {
+                    left_child_page: content.left_child_page,
+                    payload: content.payload,
+                });
             }
         }
     }
@@ -481,7 +545,7 @@ where
     delimited(multispace0, inner, multispace0)
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct ColumnDef {
     pub name: String,
     pub modifiers: String,
@@ -601,7 +665,7 @@ pub fn parse_create_table(input: &str) -> ParseResult<Vec<ColumnDef>, &str> {
 
 #[cfg(test)]
 mod tests {
-    use nom::character::complete::alphanumeric1;
+    use nom::{character::complete::alphanumeric1, UnspecializedInput};
 
     use super::*;
 
@@ -636,6 +700,16 @@ mod tests {
                 ]
             ))
         );
+    }
+
+    #[test]
+    fn test_varint() {
+        let input = &[0b1000_0001, 0b1000_0001, 0b0000_0001];
+        let res = varint(input);
+        if let Ok((_, n)) = res {
+            println!("{:b}", n);
+        }
+        assert_eq!(res, Ok((&Vec::new()[..], 0b100_0000_1000_0001)));
     }
 
     #[test]

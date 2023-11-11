@@ -2,7 +2,8 @@ mod data;
 mod parser;
 
 use anyhow::{anyhow, bail, Result};
-use data::{get_create_table, get_root_page, get_rows};
+use data::get_rows;
+use data::Database;
 use parser::{parse_cell, parse_page, Data};
 
 use std::fs::File;
@@ -29,34 +30,13 @@ fn main() -> Result<()> {
             let (rest, header) = parser::parse_header(&buf).map_err(|e| anyhow::anyhow!("{e}"))?;
             let (rest, page_header) =
                 parser::parse_page_header(rest).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let (_rest, cell_pointers) = parse_cell_pointers(rest, page_header.number_of_cells)
+            let (_rest, _cell_pointers) = parse_cell_pointers(rest, page_header.number_of_cells)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             println!("database page size: {}", header.page_size);
             println!("number of tables: {}", page_header.number_of_cells);
-            println!("{:?}", cell_pointers);
         }
-        "pages" => {
-            let mut file = File::open(&args[1])?;
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf)?;
-            let (_rest, header) = parser::parse_header(&buf).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let raw_pages: Vec<&[u8]> = buf.chunks(header.page_size as usize).collect();
-            let (
-                _rest,
-                parser::Page {
-                    header: _schema_header,
-                    values: schema,
-                },
-            ) = parser::parse_page(raw_pages[0], true).map_err(|e| anyhow!("{e}"))?;
-            if let parser::Data::Integer(root_page_index) =
-                get_root_page("superheroes", &schema)?.unwrap()
-            {
-                println!("root page: {root_page_index}");
-                let pages = data::get_pages(*root_page_index as usize, &raw_pages)?;
-                println!("{:?}", pages);
-            }
-        }
+
         ".tables" => {
             let mut file = File::open(&args[1])?;
             let mut buf = Vec::new();
@@ -84,48 +64,85 @@ fn main() -> Result<()> {
             }
         }
         s => {
-            let mut file = File::open(&args[1])?;
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf)?;
-            let header_slice = buf[0..100].to_vec();
-            let (_rest, header) =
-                parser::parse_header(&header_slice).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let raw_pages = buf.chunks(header.page_size as usize).collect::<Vec<_>>();
-            let (
-                _rest,
-                parser::Page {
-                    header: _page_header,
-                    values: schema_page,
-                },
-            ) = parse_page(raw_pages[0], true).map_err(|e| anyhow!("{e}"))?;
+            // let mut buf = Vec::new();
+            // file.read_to_end(&mut buf)?;
+            // let header_slice = buf[0..100].to_vec();
+            // let (_rest, header) =
+            //     parser::parse_header(&header_slice).map_err(|e| anyhow::anyhow!("{e}"))?;
+            // let raw_pages = buf.chunks(header.page_size as usize).collect::<Vec<_>>();
+            // let (
+            //     _rest,
+            //     parser::Page {
+            //         header: _page_header,
+            //         values: schema_page,
+            //     },
+            // ) = parse_page(raw_pages[0], true).map_err(|e| anyhow!("{e}"))?;
+            let db = Database::new(&args[1])?;
             match parser::parse_select(s) {
                 Ok((_rest, (names, table, where_))) => {
-                    let root_page = get_root_page(table, &schema_page)?;
-                    if let Some(&Data::Integer(n)) = root_page {
-                        let leaf_pages = data::get_pages(n as usize, &raw_pages)?;
+                    let root_page = db.get_root_page(&table)?;
+                    if let Some(Data::Integer(n)) = root_page {
+                        let leaf_pages = data::get_pages(n as usize, &db)?;
                         let mut values = Vec::new();
                         for leaf in &leaf_pages {
-                            let (_rest, page) = parse_page(raw_pages[leaf - 1], false)
+                            let (_rest, page) = parse_page(&db.read_page_at(*leaf as u64)?, false)
                                 .map_err(|e| anyhow!("{e}"))?;
                             values.extend(page.values);
                         }
                         if names == ["count(*)"] {
                             println!("{}", values.len());
+                        } else if where_.is_some() && db
+                            .find_index_root(&where_.as_ref().unwrap().column, table).is_some()
+                        {
+                            if let Some(where_) = where_ {
+                                // I've only implemented index search for one column,
+                                // and only for text values
+                                let rows = db.find_by_index(
+                                    &where_.column,
+                                    table,
+                                    Data::Text(where_.value.clone()),
+                                )?;
+                                let create_table = db.get_create_table(table)?;
+                                if let Some(Data::Text(_s)) = create_table {
+                                    let row_maps = rows
+                                        .iter()
+                                        .map(|row| db.match_row_with_column_names(row, table))
+                                        .collect::<Result<Vec<_>, _>>()?;
+                                    for map in row_maps.iter().filter(|m| {
+                                        m.get(&where_.column)
+                                            == Some(&Data::Text(where_.value.clone()))
+                                    }) {
+                                        let mut row_values = Vec::new();
+                                        for name in &names {
+                                            if let Some(value) = map.get(*name) {
+                                                row_values.push(value);
+                                            }
+                                        }
+                                        println!(
+                                            "{}",
+                                            row_values
+                                                .iter()
+                                                .map(|v| v.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join("|")
+                                        );
+                                    }
+                                }
+                            }
                         } else {
-                            let create_table = get_create_table(table, &schema_page)?;
+                            let create_table = db.get_create_table(table)?;
                             if let Some(Data::Text(s)) = create_table {
-                                println!("{}", s);
-                                let (_rest, columns) =
-                                    parser::parse_create_table(s).map_err(|e| anyhow!("{e}"))?;
+                                let (_rest, columns) = parser::parse_create_table(&s)
+                                    .map_err(|e| anyhow!("{e}"))?;
                                 let rows = leaf_pages
                                     .iter()
-                                    .map(|i| {
-                                        let (_rest, page) = parse_page(raw_pages[i - 1], false)
-                                            .map_err(|e| anyhow!("{e}"))?;
+                                    .flat_map(|i| {
+                                        let (_rest, page) =
+                                            parse_page(&db.read_page_at(*i as u64)?, false)
+                                                .map_err(|e| anyhow!("{e}"))?;
                                         get_rows(&page, &columns, where_.clone())
                                     })
-                                    .collect::<Result<Vec<_>, _>>()?
-                                    .concat();
+                                    .flatten();
                                 for row in rows {
                                     let mut row_values = Vec::new();
                                     for name in &names {
