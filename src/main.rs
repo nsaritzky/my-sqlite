@@ -80,7 +80,7 @@ fn main() -> Result<()> {
             let db = Database::new(&args[1])?;
             match parser::parse_select(s) {
                 Ok((_rest, (names, table, where_))) => {
-                    let root_page = db.get_root_page(&table)?;
+                    let root_page = db.get_root_page(table)?;
                     if let Some(Data::Integer(n)) = root_page {
                         let leaf_pages = data::get_pages(n as usize, &db)?;
                         let mut values = Vec::new();
@@ -91,8 +91,10 @@ fn main() -> Result<()> {
                         }
                         if names == ["count(*)"] {
                             println!("{}", values.len());
-                        } else if where_.is_some() && db
-                            .find_index_root(&where_.as_ref().unwrap().column, table).is_some()
+                        } else if where_.is_some()
+                            && db
+                                .find_index_root(&where_.as_ref().unwrap().column, table)
+                                .is_some()
                         {
                             if let Some(where_) = where_ {
                                 // I've only implemented index search for one column,
@@ -132,8 +134,8 @@ fn main() -> Result<()> {
                         } else {
                             let create_table = db.get_create_table(table)?;
                             if let Some(Data::Text(s)) = create_table {
-                                let (_rest, columns) = parser::parse_create_table(&s)
-                                    .map_err(|e| anyhow!("{e}"))?;
+                                let (_rest, columns) =
+                                    parser::parse_create_table(&s).map_err(|e| anyhow!("{e}"))?;
                                 let rows = leaf_pages
                                     .iter()
                                     .flat_map(|i| {

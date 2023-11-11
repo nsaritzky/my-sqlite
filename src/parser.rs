@@ -460,19 +460,19 @@ pub fn parse_record(input: &[u8]) -> ParseResult<Vec<Data>> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PageValue {
-    LeafTableCell {
+    LeafTable {
         payload: Vec<Data>,
         rowid: i64,
     },
-    InteriorTableCell {
+    InteriorTable {
         left_child_page: u32,
         rowid: i64,
     },
-    InteriorIndexCell {
+    InteriorIndex {
         left_child_page: u32,
         payload: Vec<Data>,
     },
-    LeafIndexCell {
+    LeafIndex {
         payload: Vec<Data>,
     },
 }
@@ -480,10 +480,10 @@ pub enum PageValue {
 impl PageValue {
     pub fn get_payload(&self) -> Option<&Vec<Data>> {
         match self {
-            PageValue::LeafTableCell { payload, .. } => Some(payload),
-            PageValue::InteriorTableCell { .. } => None,
-            PageValue::InteriorIndexCell { payload, .. } => Some(payload),
-            PageValue::LeafIndexCell { payload } => Some(payload),
+            PageValue::LeafTable { payload, .. } => Some(payload),
+            PageValue::InteriorTable { .. } => None,
+            PageValue::InteriorIndex { payload, .. } => Some(payload),
+            PageValue::LeafIndex { payload } => Some(payload),
         }
     }
 }
@@ -503,24 +503,24 @@ pub fn parse_page(input: &[u8], is_first_page: bool) -> ParseResult<Page> {
         let (_rest, cell) = parse_cell(&input[p as usize..], page_header.page_type)?;
         match cell {
             Cell::TableLeaf(content) => {
-                res.push(PageValue::LeafTableCell {
+                res.push(PageValue::LeafTable {
                     payload: content.payload,
                     rowid: content.row_id,
                 });
             }
             Cell::TableInterior(content) => {
-                res.push(PageValue::InteriorTableCell {
+                res.push(PageValue::InteriorTable {
                     left_child_page: content.left_child_page,
                     rowid: content.row_id,
                 });
             }
             Cell::IndexLeaf(content) => {
-                res.push(PageValue::LeafIndexCell {
+                res.push(PageValue::LeafIndex {
                     payload: content.payload,
                 });
             }
             Cell::IndexInterior(content) => {
-                res.push(PageValue::InteriorIndexCell {
+                res.push(PageValue::InteriorIndex {
                     left_child_page: content.left_child_page,
                     payload: content.payload,
                 });

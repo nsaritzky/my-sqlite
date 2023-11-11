@@ -22,7 +22,7 @@ fn get_schema_value_by_index<'a>(
     schema
         .iter()
         .find(|elem| {
-            if let PageValue::LeafTableCell { payload: vec, .. } = elem {
+            if let PageValue::LeafTable { payload: vec, .. } = elem {
                 let s = if let Data::Text(s) = &vec[2] {
                     Some(s)
                 } else {
@@ -34,7 +34,7 @@ fn get_schema_value_by_index<'a>(
             }
         })
         .map(|v| -> Result<Data, _> {
-            if let PageValue::LeafTableCell { payload: vec, .. } = v {
+            if let PageValue::LeafTable { payload: vec, .. } = v {
                 Ok(vec[i].clone())
             } else {
                 Err(anyhow!("Not a data page"))
@@ -71,7 +71,7 @@ pub fn get_pages(root_index: usize, db: &Database) -> Result<Vec<usize>, anyhow:
             "Root page is interior but has no right most pointer"
         ))? as usize);
         for value in root.values {
-            if let parser::PageValue::InteriorTableCell {
+            if let parser::PageValue::InteriorTable {
                 left_child_page,
                 rowid: _,
             } = value
@@ -97,7 +97,7 @@ pub fn get_rows<'a>(
 ) -> Result<Vec<HashMap<String, parser::Data>>, anyhow::Error> {
     let mut rows = Vec::<HashMap<String, parser::Data>>::new();
     for val in &page.values {
-        if let parser::PageValue::LeafTableCell {
+        if let parser::PageValue::LeafTable {
             payload: vec,
             rowid,
         } = val
@@ -107,7 +107,7 @@ pub fn get_rows<'a>(
                 // If the column is the integer primary key, then it must be null,
                 // and we substitute the row id.
                 if col.ipk {
-                    map.insert(col.name.clone(), Data::Integer(*rowid as i64));
+                    map.insert(col.name.clone(), Data::Integer(*rowid));
                 } else {
                     map.insert(col.name.clone(), vec[i].clone());
                 }
@@ -140,18 +140,14 @@ pub fn search_index(
     let (_, root) = parser::parse_page(&db.read_page_at(root_index as u64)?, false)
         .map_err(|e| anyhow!("{e}"))?;
     let m = root.values.partition_point(|v| {
-        if let PageValue::InteriorIndexCell { payload, .. } | PageValue::LeafIndexCell { payload } =
-            v
-        {
+        if let PageValue::InteriorIndex { payload, .. } | PageValue::LeafIndex { payload } = v {
             payload[0] < value
         } else {
             panic!("Not an index page")
         }
     });
     let n = root.values.partition_point(|v| {
-        if let PageValue::InteriorIndexCell { payload, .. } | PageValue::LeafIndexCell { payload } =
-            v
-        {
+        if let PageValue::InteriorIndex { payload, .. } | PageValue::LeafIndex { payload } = v {
             payload[0] <= value
         } else {
             panic!("Not an index page")
@@ -160,7 +156,7 @@ pub fn search_index(
     let mut results = Vec::new();
     for i in m..=(n.min(root.values.len() - 1)) {
         match &root.values[i] {
-            PageValue::InteriorIndexCell {
+            PageValue::InteriorIndex {
                 left_child_page,
                 payload,
             } => {
@@ -169,7 +165,7 @@ pub fn search_index(
                 }
                 results.extend(search_index(*left_child_page as usize, value.clone(), db)?);
             }
-            PageValue::LeafIndexCell { payload } => {
+            PageValue::LeafIndex { payload } => {
                 if let Data::Integer(k) = payload[1] {
                     // if i == m {
                     results.push(k);
@@ -199,21 +195,19 @@ pub fn search_by_rowid(
     let root = db.read_page_at(root_page_number)?;
     let (_, root) = parser::parse_page(&root, false).map_err(|e| anyhow!("{e}"))?;
     let i = root.values.binary_search_by_key(&rowid_to_find, |v| {
-        if let PageValue::LeafTableCell { rowid, .. } | PageValue::InteriorTableCell { rowid, .. } =
-            v
-        {
-            *rowid as i64
+        if let PageValue::LeafTable { rowid, .. } | PageValue::InteriorTable { rowid, .. } = v {
+            *rowid
         } else {
             panic!("Not a table age")
         }
     });
     if let Ok(i) = i {
         // If the page is a table leaf and the rowid is present, return the data
-        if let PageValue::LeafTableCell { .. } = &root.values[i] {
-            return Ok(root.values[i].clone());
+        if let PageValue::LeafTable { .. } = &root.values[i] {
+            Ok(root.values[i].clone())
         // If the page is a table interior and the rowid is present, that means
         // the rowid is not in the table.
-        } else if let PageValue::InteriorTableCell { .. } = &root.values[i] {
+        } else if let PageValue::InteriorTable { .. } = &root.values[i] {
             bail!("Rowid not in table");
         // This function should not be called on index pages
         } else {
@@ -230,7 +224,7 @@ pub fn search_by_rowid(
                 return search_by_rowid(db, right_most_pointer as u64, rowid_to_find);
             }
         }
-        if let PageValue::InteriorTableCell {
+        if let PageValue::InteriorTable {
             left_child_page,
             rowid: _,
         } = &root.values[i]
@@ -306,7 +300,7 @@ impl Database {
         // TODO: This is a hack. We should parse the create table statement.
         let column_regex = Regex::new(&format!("(?i)on {table}\\s*\\({column}\\)")).unwrap();
         let index = self.schema_page.iter().find(|elem| {
-            if let PageValue::LeafTableCell { payload: vec, .. } = elem {
+            if let PageValue::LeafTable { payload: vec, .. } = elem {
                 if let Data::Text(s) = &vec[0] {
                     if s == "index" {
                         if let Data::Text(sql) = &vec[4] {
@@ -325,7 +319,7 @@ impl Database {
             }
         });
         index.map(|idx| {
-            if let PageValue::LeafTableCell { payload: vec, .. } = idx {
+            if let PageValue::LeafTable { payload: vec, .. } = idx {
                 if let Data::Integer(n) = &vec[3] {
                     *n as usize
                 } else {
@@ -366,7 +360,7 @@ impl Database {
         let create_table = self.get_create_table(table_name)?;
         if let Some(Data::Text(sql)) = create_table {
             let (_, columns) = parser::parse_create_table(&sql).map_err(|e| anyhow!("{e}"))?;
-            if let PageValue::LeafTableCell { payload, rowid } = row {
+            if let PageValue::LeafTable { payload, rowid } = row {
                 map.insert("rowid".to_string(), Data::Integer(*rowid));
                 for (i, col) in columns.iter().enumerate() {
                     // If the column is an integer primary key, insert rowid for value instead
