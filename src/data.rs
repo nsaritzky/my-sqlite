@@ -12,7 +12,7 @@ const ROOT_PAGE_INDEX: usize = 3;
 const CREATE_TABLE_INDEX: usize = 4;
 
 // Given the schema page and a table name, return the root page of the table.
-// The option fails if the table does not exist. The Result vails if the
+// The option fails if the table does not exist. The Result fails if the
 // schema is not a leaf page.
 fn get_schema_value_by_index<'a>(
     table_name: &'a str,
@@ -43,6 +43,7 @@ fn get_schema_value_by_index<'a>(
         .transpose()
 }
 
+// Given the schema page and a table name, return the root page of the table.
 pub fn get_root_page<'a>(
     table_name: &'a str,
     schema: &'a [PageValue],
@@ -50,6 +51,7 @@ pub fn get_root_page<'a>(
     get_schema_value_by_index(table_name, schema, ROOT_PAGE_INDEX)
 }
 
+// Given the schema page and a table name, return the create table statement for the table
 pub fn get_create_table<'a>(
     table_name: &'a str,
     schema: &'a [PageValue],
@@ -57,6 +59,7 @@ pub fn get_create_table<'a>(
     get_schema_value_by_index(table_name, schema, CREATE_TABLE_INDEX)
 }
 
+// Given the root page of a table, return the page numbers of all its pages
 pub fn get_pages(root_index: usize, db: &Database) -> Result<Vec<usize>, anyhow::Error> {
     let (_, root) = parser::parse_page(&db.read_page_at(root_index as u64)?, false)
         .map_err(|e| anyhow!("{e}"))?;
@@ -90,6 +93,7 @@ pub fn get_pages(root_index: usize, db: &Database) -> Result<Vec<usize>, anyhow:
     }
 }
 
+// Given a page and the columns of a table, return the rows of the table.
 pub fn get_rows<'a>(
     page: &'a Page,
     columns: &'a [parser::ColumnDef],
@@ -132,6 +136,7 @@ pub fn get_rows<'a>(
     Ok(rows)
 }
 
+// Use an index to find the rowids of rows that match a value
 pub fn search_index(
     root_index: usize,
     value: Data,
@@ -187,6 +192,7 @@ pub fn search_index(
     Ok(results)
 }
 
+// Given a database and a root page, us a binary search to find a given rowid
 pub fn search_by_rowid(
     db: &Database,
     root_page_number: u64,
@@ -238,18 +244,20 @@ pub fn search_by_rowid(
     }
 }
 
+// Represents a database file. The schema_page field stores the schema page for reference.
 pub struct Database {
     filename: String,
-    cursor: RefCell<u64>,
     page_size: u64,
     schema_page: Vec<PageValue>,
 }
 
 impl Database {
+    // Create a new database instance from a filename
     pub fn new(filename: &str) -> Result<Self, anyhow::Error> {
         let mut raw_header = [0; 100];
         let mut file = File::open(filename)?;
         file.read_exact(&mut raw_header)?;
+        // Read the header to get the page size, then read the schema page
         let (_, header) = parser::parse_header(&raw_header).map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut buf = vec![0; header.page_size as usize];
         file.rewind()?;
@@ -258,25 +266,28 @@ impl Database {
             parser::parse_page(&buf, true).map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(Self {
             filename: filename.to_string(),
-            cursor: RefCell::new(0),
             page_size: header.page_size as u64,
             schema_page: schema_page.values,
         })
     }
 
+    // Read the page at the current cursor position
     fn read_page(&self, file: &mut File) -> Result<Vec<u8>, anyhow::Error> {
         let mut buf = vec![0; self.page_size as usize];
         file.read_exact(&mut buf)?;
-        self.cursor.replace_with(|&mut c| c + self.page_size);
         Ok(buf)
     }
 
+    // Read a page at a given page number
+    // TODO The performance of this function could probably be improved
     pub fn read_page_at(&self, page_number: u64) -> Result<Vec<u8>, anyhow::Error> {
         let mut file = File::open(&self.filename)?;
+        // Page numbers start at 1
         file.seek(SeekFrom::Start((page_number - 1) * self.page_size))?;
         self.read_page(&mut file)
     }
 
+    // Read multiple pages at given page numbers
     fn _read_pages(&self, page_numbers: &[u64]) -> Result<Vec<Vec<u8>>, anyhow::Error> {
         let mut pages = Vec::new();
         for page_number in page_numbers {
@@ -285,10 +296,12 @@ impl Database {
         Ok(pages)
     }
 
+    // Get the root page of a table given its name
     pub fn get_root_page<'a>(&'a self, table_name: &'a str) -> Result<Option<Data>, anyhow::Error> {
         get_root_page(table_name, &self.schema_page)
     }
 
+    // Get the create table statement of a table given its name
     pub fn get_create_table<'a>(
         &'a self,
         table_name: &'a str,
@@ -296,6 +309,7 @@ impl Database {
         get_create_table(table_name, &self.schema_page)
     }
 
+    // Get the root page of an index given its table and column names
     pub fn find_index_root(&self, column: &str, table: &str) -> Option<usize> {
         // TODO: This is a hack. We should parse the create table statement.
         let column_regex = Regex::new(&format!("(?i)on {table}\\s*\\({column}\\)")).unwrap();
@@ -331,6 +345,7 @@ impl Database {
         })
     }
 
+    // Find the rows of a table that match a value using an index
     pub fn find_by_index(
         &self,
         column: &str,
@@ -351,6 +366,7 @@ impl Database {
         }
     }
 
+    // Given a row and a table name, return a map of column names to values
     pub fn match_row_with_column_names(
         &self,
         row: &PageValue,

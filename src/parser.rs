@@ -13,11 +13,13 @@ use nom::{
 };
 use regex::Regex;
 
+// Flag values for the types of table page
 const PAGE_TYPE_INTERIOR_INDEX: u8 = 2;
 const PAGE_TYPE_INTERIOR_TABLE: u8 = 5;
 const PAGE_TYPE_LEAF_INDEX: u8 = 10;
 const PAGE_TYPE_LEAF_TABLE: u8 = 13;
 
+// Represents the header of a SQLite database file
 #[derive(Debug, Clone)]
 pub struct Header {
     pub magic: String,
@@ -44,9 +46,12 @@ pub struct Header {
     pub sqlite_version_number: u32,
 }
 
+// Shorthand type for a parser result
 type ParseResult<'a, T, I = &'a [u8], E = nom::error::Error<I>> = IResult<I, T, E>;
 
+// Parses the header of a SQLite database file
 pub fn parse_header(input: &[u8]) -> ParseResult<Header> {
+    // The tuple parser has limited length, so we need to split it into two
     let mut first_parser = tuple((
         terminated(tag("SQLite format 3"), tag("\0")),
         be_u16,
@@ -105,6 +110,7 @@ pub fn parse_header(input: &[u8]) -> ParseResult<Header> {
     ))
 }
 
+// Represents the header of a SQLite database page
 #[derive(Debug)]
 pub struct PageHeader {
     pub page_type: PageType,
@@ -115,6 +121,7 @@ pub struct PageHeader {
     pub right_most_pointer: Option<u32>,
 }
 
+// Represents the type of a SQLite database page
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PageType {
     InteriorIndex,
@@ -123,6 +130,7 @@ pub enum PageType {
     LeafTable,
 }
 
+// Parses the type of a SQLite database page
 fn parse_page_type(input: &[u8]) -> ParseResult<PageType> {
     let (rest, x) = be_u8(input)?;
     match x {
@@ -137,9 +145,11 @@ fn parse_page_type(input: &[u8]) -> ParseResult<PageType> {
     }
 }
 
+// Parses the header of a SQLite database page
 pub fn parse_page_header(input: &[u8]) -> ParseResult<PageHeader> {
     let (_rest, page_type) = parse_page_type(input)?;
     match page_type {
+        // Interior pages include a right-most pointer
         PageType::InteriorIndex | PageType::InteriorTable => {
             let (rest, t) = tuple((parse_page_type, be_u16, be_u16, be_u16, be_u8, be_u32))(input)?;
             Ok((
@@ -172,6 +182,7 @@ pub fn parse_page_header(input: &[u8]) -> ParseResult<PageHeader> {
     }
 }
 
+// Parses the cell pointers of a SQLite database page
 pub fn parse_cell_pointers(input: &[u8], number_of_cells: u16) -> ParseResult<Vec<u16>> {
     let parser = take(number_of_cells as usize * 2);
     let (rest, cells) = parser(input)?;
@@ -185,38 +196,7 @@ pub fn parse_cell_pointers(input: &[u8], number_of_cells: u16) -> ParseResult<Ve
     Ok((rest, res))
 }
 
-// /// Parse a SQLite variable-length integer (varint).
-// fn varint(input: &[u8]) -> IResult<&[u8], u64> {
-//     // Each byte can contribute to at most 7 bits of the data.
-//     // If the high bit of a byte is set, it means that the next byte is also part of the varint.
-//     let mut value: u64 = 0;
-//     let mut bytes_read = 0;
-
-//     let (mut input, _) = take(1usize)(input)?;
-//     for byte in input.iter().take(9) {
-//         // Varints are at most 9 bytes long.
-//         // Add the low 7 bits to value.
-//         value |= (byte & 0x7F) as u64;
-//         bytes_read += 1;
-
-//         if byte & 0x80 == 0 {
-//             // If the high bit is not set, this is the last byte.
-//             break;
-//         }
-
-//         if bytes_read != 9 {
-//             // Shift to make room for the next 7 bits, unless this is the last byte.
-//             value <<= 7;
-//         }
-
-//         // Move to the next byte.
-//         let (i, _) = take(1usize)(input)?;
-//         input = i;
-//     }
-
-//     Ok((input, value))
-// }
-
+// Parses a variable-length integer
 fn varint(input: &[u8]) -> ParseResult<i64> {
     let mut res = 0;
     let mut index = 0;
@@ -235,6 +215,8 @@ fn varint(input: &[u8]) -> ParseResult<i64> {
         nom::error::ErrorKind::Fail,
     )))
 }
+
+// Represent a SQLite database cell, depending on the type of page
 
 #[derive(Debug)]
 pub struct TableLeafCell {
@@ -272,10 +254,12 @@ pub enum Cell {
     IndexInterior(IndexInteriorCell),
 }
 
+// Overflow cells have not been implemented yet, so we assume there are none
 fn does_overflow(_u: usize, _p: usize) -> bool {
     false
 }
 
+// Parses a SQLite database cell
 pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
     match page_type {
         PageType::LeafTable => {
@@ -338,6 +322,7 @@ pub fn parse_cell(input: &[u8], page_type: PageType) -> ParseResult<Cell> {
     }
 }
 
+// Represents a SQLite database value
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Data {
     Null,
@@ -359,30 +344,7 @@ impl std::fmt::Display for Data {
     }
 }
 
-// #[derive(Debug)]
-// pub struct SqliteSchemaRow {
-//     pub type_: String,
-//     pub name: String,
-//     pub tbl_name: String,
-//     pub rootpage: u32,
-//     pub sql: String,
-// }
-
-// pub fn parse_schema(input: &[u8]) -> ParseResult<Vec<SqliteSchemaRow>> {
-//     let (rest, page_header) = parse_page_header(input)?;
-//     let (rest, cell_pointers) = parse_cell_pointers(rest, page_header.number_of_cells)?;
-//     let res = Vec::new();
-//     for p in cell_pointers {
-//         let (rest, cell) = parse_cell(&input[p as usize..], page_header.page_type)?;
-//         match cell {
-//             Cell::TableLeaf(content) => {
-
-//             }
-//             _ => bail!("Not a table leaf"),
-//         }
-//     }
-// }
-
+// Parses a SQLite database record
 pub fn parse_record(input: &[u8]) -> ParseResult<Vec<Data>> {
     let (mut rest_outer, (bytes_consumed, header_size)) = consumed(varint)(input)?;
     let mut remaining_in_header = header_size - bytes_consumed.len() as i64;
@@ -488,12 +450,14 @@ impl PageValue {
     }
 }
 
+// Represents a SQLite database page
 #[derive(Debug)]
 pub struct Page {
     pub header: PageHeader,
     pub values: Vec<PageValue>,
 }
 
+// Parses a SQLite database page. The is_first_page argument is used to skip the header of the first page.
 pub fn parse_page(input: &[u8], is_first_page: bool) -> ParseResult<Page> {
     let offset = if is_first_page { 100 } else { 0 };
     let (rest, page_header) = parse_page_header(&input[offset..])?;
@@ -536,6 +500,7 @@ pub fn parse_page(input: &[u8], is_first_page: bool) -> ParseResult<Page> {
     ))
 }
 
+// Combinator that parses a whitespace-delimited parser
 fn ws<'a, F: 'a, O, E: ParseError<&'a str>>(
     inner: F,
 ) -> impl FnMut(&'a str) -> IResult<&'a str, O, E>
@@ -545,6 +510,7 @@ where
     delimited(multispace0, inner, multispace0)
 }
 
+// Represents a column definition
 #[derive(Debug, PartialEq, Clone)]
 pub struct ColumnDef {
     pub name: String,
@@ -552,6 +518,7 @@ pub struct ColumnDef {
     pub ipk: bool, // is an integer primary key
 }
 
+// Represents a comparator that could appear in a WHERE clause
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Clone)]
 pub enum Comparator {
@@ -563,6 +530,7 @@ pub enum Comparator {
     Ge,
 }
 
+// Represents a WHERE clause
 #[derive(Debug, PartialEq, Clone)]
 pub struct WhereClause {
     pub column: String,
@@ -570,6 +538,7 @@ pub struct WhereClause {
     pub value: String,
 }
 
+// Parses a WHERE clause
 fn parse_where(input: &str) -> ParseResult<WhereClause, &str> {
     let (rest, _) = ws(tag_no_case("where"))(input)?;
     let (rest, column) = ws(identifier)(rest)?;
@@ -608,6 +577,7 @@ fn parse_where(input: &str) -> ParseResult<WhereClause, &str> {
     ))
 }
 
+// Parses a SELECT statement
 pub fn parse_select(input: &str) -> ParseResult<(Vec<&str>, &str, Option<WhereClause>), &str> {
     let columns = separated_list1(ws(char::<&str, nom::error::Error<_>>(',')), identifier);
     let (rest, (columns, _from, table, where_)) = preceded(
@@ -626,6 +596,7 @@ pub fn parse_select(input: &str) -> ParseResult<(Vec<&str>, &str, Option<WhereCl
     Ok((rest, (columns, table, where_)))
 }
 
+// Parses a snake_caps identifier, or a quoted identifier with spaces
 fn identifier(input: &str) -> ParseResult<&str, &str> {
     alt((
         take_while1(|c: char| c.is_alphanumeric() || c == '_'),
@@ -637,6 +608,7 @@ fn identifier(input: &str) -> ParseResult<&str, &str> {
     ))(input)
 }
 
+// Parses a CREATE TABLE statement
 pub fn parse_create_table(input: &str) -> ParseResult<Vec<ColumnDef>, &str> {
     let ipk_regex = Regex::new(r"(?i)integer primary key").unwrap();
     let list = delimited(

@@ -64,19 +64,6 @@ fn main() -> Result<()> {
             }
         }
         s => {
-            // let mut buf = Vec::new();
-            // file.read_to_end(&mut buf)?;
-            // let header_slice = buf[0..100].to_vec();
-            // let (_rest, header) =
-            //     parser::parse_header(&header_slice).map_err(|e| anyhow::anyhow!("{e}"))?;
-            // let raw_pages = buf.chunks(header.page_size as usize).collect::<Vec<_>>();
-            // let (
-            //     _rest,
-            //     parser::Page {
-            //         header: _page_header,
-            //         values: schema_page,
-            //     },
-            // ) = parse_page(raw_pages[0], true).map_err(|e| anyhow!("{e}"))?;
             let db = Database::new(&args[1])?;
             match parser::parse_select(s) {
                 Ok((_rest, (names, table, where_))) => {
@@ -91,9 +78,10 @@ fn main() -> Result<()> {
                         }
                         if names == ["count(*)"] {
                             println!("{}", values.len());
+                        // If there is a where clause reference an indexed column, use the index
                         } else if where_.is_some()
                             && db
-                                .find_index_root(&where_.as_ref().unwrap().column, table)
+                                .find_index_root(&where_.as_ref().unwrap().column, table) //Unwrap is safe due to is_some check
                                 .is_some()
                         {
                             if let Some(where_) = where_ {
@@ -105,6 +93,7 @@ fn main() -> Result<()> {
                                     Data::Text(where_.value.clone()),
                                 )?;
                                 let create_table = db.get_create_table(table)?;
+                                // Use the create-table statement to get the column names
                                 if let Some(Data::Text(_s)) = create_table {
                                     let row_maps = rows
                                         .iter()
@@ -131,6 +120,7 @@ fn main() -> Result<()> {
                                     }
                                 }
                             }
+                        // Handle the general case where there is no index
                         } else {
                             let create_table = db.get_create_table(table)?;
                             if let Some(Data::Text(s)) = create_table {
